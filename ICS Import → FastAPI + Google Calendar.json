@@ -1,0 +1,191 @@
+{
+  "name": "ICS Import → FastAPI + Google Calendar",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ics-upload",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryPropertyName": "file",
+          "rawBody": false
+        }
+      },
+      "id": "238f5b25-cf75-4cdf-8fb6-d071239efe70",
+      "name": "Webhook ICS Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "ics-upload-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "function unfoldIcs(text) {\n  return text.replace(/\\r?\\n[ \\t]/g, '');\n}\n\nfunction getValue(block, name) {\n  const regex = new RegExp('^' + name + '(?:;[^:]*)?:(.*)$', 'mi');\n  const match = block.match(regex);\n  return match ? match[1].trim() : '';\n}\n\nfunction parseDate(value) {\n  if (!value) return null;\n\n  const clean = value.replace('Z', '');\n  return `${clean.slice(0,4)}-${clean.slice(4,6)}-${clean.slice(6,8)}T${clean.slice(9,11) || '00'}:${clean.slice(11,13) || '00'}:${clean.slice(13,15) || '00'}+02:00`;\n}\n\nconst item = $input.first();\n\nif (!item.binary) {\n  throw new Error(\"Aucun fichier reçu. Vérifie le Webhook + curl -F.\");\n}\n\nconst binaryKey = Object.keys(item.binary)[0];\n\nif (!binaryKey) {\n  throw new Error(\"Aucun fichier binary trouvé.\");\n}\n\nconst binaryData = item.binary[binaryKey];\n\nif (!binaryData.data) {\n  throw new Error(\"Le fichier est reçu mais il n'y a pas de data.\");\n}\n\nconst buffer = await this.helpers.getBinaryDataBuffer(0, binaryKey);\nconst icsText = unfoldIcs(buffer.toString('utf-8'));\n\nconst blocks = icsText.match(/BEGIN:VEVENT[\\s\\S]*?END:VEVENT/g) || [];\n\nconst events = blocks.map(block => {\n  const uid = getValue(block, 'UID');\n  const title = getValue(block, 'SUMMARY') || '(Sans titre)';\n  const description = getValue(block, 'DESCRIPTION');\n  const location = getValue(block, 'LOCATION');\n  const dtstart = getValue(block, 'DTSTART');\n  const dtend = getValue(block, 'DTEND');\n  const rrule = getValue(block, 'RRULE');\n\n  return {\n    uid: uid || `${title}-${dtstart}`,\n    title,\n    description,\n    location,\n    start_time: parseDate(dtstart),\n    end_time: parseDate(dtend),\n    is_recurring: !!rrule,\n    rrule,\n    raw_start: dtstart,\n    raw_end: dtend\n  };\n});\n\nreturn events.map(e => ({ json: e }));"
+      },
+      "id": "bccfe914-1399-4719-b6f8-ae893b0db617",
+      "name": "Parse ICS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const HORIZON_DAYS = 365;\nconst MAX_OCCURRENCES = 60;\n\nfunction addDays(date, days) {\n  const d = new Date(date);\n  d.setDate(d.getDate() + days);\n  return d;\n}\n\nfunction makeUid(masterUid, date) {\n  return `${masterUid}_${date.toISOString().slice(0, 10)}`;\n}\n\nconst output = [];\nconst horizon = new Date(Date.now() + HORIZON_DAYS * 86400000);\n\nfor (const item of $input.all()) {\n  const e = item.json;\n\n  if (!e.is_recurring || !e.rrule) {\n    output.push({ json: e });\n    continue;\n  }\n\n  const start = new Date(e.start_time);\n  const end = new Date(e.end_time);\n  const duration = end - start;\n\n  let current = new Date(start);\n  let count = 0;\n\n  while (current <= horizon && count < MAX_OCCURRENCES) {\n    const occEnd = new Date(current.getTime() + duration);\n\n    output.push({\n      json: {\n        uid: makeUid(e.uid, current),\n        master_uid: e.uid,\n        title: e.title,\n        description: e.description,\n        location: e.location,\n        start_time: current.toISOString(),\n        end_time: occEnd.toISOString(),\n        is_recurring: true,\n        rrule: e.rrule\n      }\n    });\n\n    current = addDays(current, 7);\n    count++;\n  }\n}\n\nreturn output;"
+      },
+      "id": "62e11bc4-e0e1-4756-9c4f-554e3a823db1",
+      "name": "Expand Recurrences",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const events = $input.all().map(item => ({\n  uid: item.json.uid,\n  title: item.json.title,\n  start_time: item.json.start_time,\n  end_time: item.json.end_time,\n  location: item.json.location || '',\n  description: item.json.description || '',\n}));\n\nreturn [{ json: { events } }];"
+      },
+      "id": "9e0913a7-8fc9-4e79-8b83-f43031571c8e",
+      "name": "Build FastAPI Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/api/calendar/events",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "9565415e-c043-443d-a56a-bbfe50ed287e",
+      "name": "Send to FastAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const payload = $('Build FastAPI Payload').first().json;\nreturn payload.events.map(e => ({ json: e }));"
+      },
+      "id": "aecf744c-2bf8-4aea-affe-b6013f907cee",
+      "name": "Prep for Google Calendar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"ok\",\n  \"imported\": {{ $('Build FastAPI Payload').first().json.events.length }}\n}",
+        "options": {}
+      },
+      "id": "0fd955e9-5aed-42e9-96e1-d765a888f531",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1408,
+        16
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook ICS Upload": {
+      "main": [
+        [
+          {
+            "node": "Parse ICS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse ICS": {
+      "main": [
+        [
+          {
+            "node": "Expand Recurrences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Recurrences": {
+      "main": [
+        [
+          {
+            "node": "Build FastAPI Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build FastAPI Payload": {
+      "main": [
+        [
+          {
+            "node": "Send to FastAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to FastAPI": {
+      "main": [
+        [
+          {
+            "node": "Prep for Google Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep for Google Calendar": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "68b23776-9ef8-45c0-8c4c-433d7d074ec5",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "c80576b121f7e8be790c8ec6cabc94a405c24b4158bfd8b813dc8d599c680d9f"
+  },
+  "id": "WenkIwQxevFuXDa4",
+  "tags": []
+}

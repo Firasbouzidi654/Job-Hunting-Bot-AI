@@ -1,0 +1,127 @@
+{
+  "name": "HTW Berlin Grades Extractor",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "grades/extract",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryPropertyName": "file",
+          "rawBody": false
+        }
+      },
+      "id": "41c1a0f0-52d4-4e85-825d-2681e25eac02",
+      "name": "Webhook - Receive PDF",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "grades-extract-webhook"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "file0",
+        "options": {
+          "joinPages": true
+        }
+      },
+      "id": "5b0226c3-40fc-411b-a270-646e5b8eb458",
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.text || '';\n\nconst lines = raw\n  .split(/\\r?\\n/)\n  .map(l => l.replace(/\\s+/g, ' ').trim())\n  .filter(l => l.length > 0);\n\nlet studentName = '';\nlet totalCredits = 0;\nconst courses = [];\n\nfor (const line of lines) {\n  let m = line.match(/^(?:Herr|Frau)\\s+([A-Za-zÄÖÜäöüß\\-\\s]+?)(?:,| geboren| Matrikel|$)/);\n  if (m) {\n    studentName = m[1].trim();\n    break;\n  }\n}\n\nconst rowRegex = new RegExp(\n  '^(.+?)\\\\s+' +\n  '((?:SS|WS|SoSe|WiSe)\\\\s?\\\\d{2}(?:\\\\s*\\\\/\\\\s*\\\\d{2})?(?:\\\\s*-\\\\s*\\\\d{1,2})?)\\\\s+' +\n  '(\\\\d[.,]\\\\d|mit\\\\s+Erfolg)\\\\s+' +\n  '(?:BE|NB|AN)\\\\s*\\\\/?\\\\s*\\\\d+\\\\s+' +\n  '(\\\\d+(?:[.,]\\\\d+)?)\\\\s+' +\n  '(?:PF|WP|WPF)\\\\s*$',\n  'i'\n);\n\nlet buffer = '';\n\nfor (const line of lines) {\n  const candidate = buffer ? `${buffer} ${line}` : line;\n  const m = candidate.match(rowRegex);\n\n  if (m) {\n    let courseName = m[1].replace(/\\s+/g, ' ').trim();\n\n    courseName = courseName\n      .replace(/^.*?Wirtschaftsinformatik \\(Bachelor\\)\\s+/i, '')\n      .replace(/^.*?PF\\/WP\\s+/i, '')\n      .trim();\n\n    const credits = parseFloat(m[4].replace(',', '.'));\n\n    courses.push({\n      courseName,\n      semester: m[2]\n        .replace(/\\s+/g, '')\n        .toUpperCase()\n        .replace('SOSE', 'SS')\n        .replace('WISE', 'WS'),\n      grade: m[3].replace('.', ','),\n      credits\n    });\n\n    totalCredits += credits;\n    buffer = '';\n  } else {\n    if (line.length < 150) {\n      buffer = candidate;\n      if (buffer.length > 260) buffer = '';\n    } else {\n      buffer = '';\n    }\n  }\n}\n\nfor (const line of lines) {\n  const m = line.match(/Summe aller Leistungspunkte:\\s*(\\d+)/i);\n  if (m) {\n    totalCredits = Number(m[1]);\n    break;\n  }\n}\n\nreturn [{\n  json: {\n    studentName,\n    totalCredits,\n    courses\n  }\n}];"
+      },
+      "id": "e28ae546-f4cb-4974-bbf1-2784c8448b34",
+      "name": "Parse Grades",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "89572728-7eb3-41ff-8a46-066233b83971",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        720,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Receive PDF": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Parse Grades",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Grades": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "109334ab-fc6e-4fda-8f74-69d4cf514ad3",
+  "meta": {
+    "instanceId": "c80576b121f7e8be790c8ec6cabc94a405c24b4158bfd8b813dc8d599c680d9f"
+  },
+  "id": "DZv8u1IsqlqX43sU",
+  "tags": []
+}
